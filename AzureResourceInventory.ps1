@@ -231,7 +231,7 @@ param ($TenantID,
                     }
                 else 
                     {
-                        az login --only-show-errors | Out-Null
+                        az login --tenant 937d19e2-3481-443b-b230-38803a968598 --only-show-errors | Out-Null
                     }
                 write-host ""
                 write-host ""
