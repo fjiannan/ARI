@@ -12,18 +12,18 @@ https://github.com/microsoft/ARI/Automation/ARI_Automation.ps1
 This powershell Script is part of Azure Resource Inventory (ARI)
 
 .NOTES
-Version: 2.0.0
+Version: 3.1.3
 First Release Date: 19th November, 2020
-Authors: Claudio Merola and Renato Gregio 
+Authors: Claudio Merola
 
 Core Steps:
 1 ) Create System Identity
-2 ) Give Read Permissions to the System Identity
+2 ) Give Read Permissions to the System Identity in the Management Group
 3 ) Create Blob Storage Account
 4 ) Create Container
 5 ) Give "Storage Blob Data Contributor" Permissions to the System Identity on the Storage Account
-6 ) Give Contributor Permissions on the Container*
-7 ) Add modules "ImportExcel", "Az.ResourceGraph", "Az.Storage", "Az.Account"
+6 ) Create Runbook Powershell with Runtime 7.2
+7 ) Add modules "ImportExcel", "Az.ResourceGraph", "Az.Storage", "Az.Account" and "ThreadJob" (Runtime 7.2)
 
 #>
 
@@ -33,10 +33,14 @@ Core Steps:
 $STGACC = "azureinventorystg"
 
 #Container Name
-$STGCTG = 'azureresourceinventory'
+$STGCTG = 'ari'
 
-#Define if creating Draw.io Diagram File
-$Diagram = $false
+#Include Tags
+$InTag = $false
+
+#Lite
+$RunLite = $true
+
 
 <######################################################### SCRIPT ######################################################################>
 
@@ -54,16 +58,14 @@ $Date = get-date -Format "yyyy-MM-dd_HH_mm"
 $DateStart = get-date
 
 $File = ("ARI_Automation_Report_"+$Date+".xlsx")
-$DDFile = ("ARI_Automation_Diagram_" + $Date + ".xml")
 
 
 $Resources = @()
 $Advisories = @()
-$Security = @()
 $Subscriptions = ''
 
-$Repo = 'https://github.com/azureinventory/ARI/tree/main/Modules'
-$RawRepo = 'https://raw.githubusercontent.com/azureinventory/ARI/main'
+$Repo = 'https://api.github.com/repos/microsoft/ari/git/trees/main?recursive=1'
+$RawRepo = 'https://raw.githubusercontent.com/microsoft/ARI/main'
 
 <######################################################### ADVISORY EXTRACTION ######################################################################>
 
@@ -95,7 +97,7 @@ $Subscriptions = $Subscriptions.Subscription
 <######################################################### RESOURCE EXTRACTION ######################################################################>
 
 Write-Output 'Extracting Resources'
- 
+
     Foreach ($Subscription in $Subscriptions) {
 
         $SUBID = $Subscription.id
@@ -125,16 +127,6 @@ $ExtractionRunTime = get-date
 $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extras/Support.json')
 $Unsupported = $ModuSeq | ConvertFrom-Json
 
-if($Diagram)
-{
-Write-Output ('Processing Diagram')
-
-$ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extras/DrawIODiagram.ps1')               
-                    
-$ScriptBlock = [Scriptblock]::Create($ModuSeq)
-                    
-Start-job -Name 'DrawDiagram' -ScriptBlock {$ScriptBlock } -ArgumentList $Subscriptions, $Resources, $Advisories, $DDFile
-}
 
 <######################################################### ADVISORY JOB ######################################################################>
 
@@ -145,7 +137,7 @@ $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extras/
 
 $ScriptBlock = [Scriptblock]::Create($ModuSeq)
 
-Start-Job -Name 'Advisory' -ScriptBlock $ScriptBlock -ArgumentList $Advisories, 'Processing' , $File
+Start-ThreadJob -Name 'Advisory' -ScriptBlock $ScriptBlock -ArgumentList $Advisories, 'Processing' , $File
 
             
 <######################################################### SUBSCRIPTIONS JOB ######################################################################>
@@ -156,7 +148,7 @@ $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extras/
 
 $ScriptBlock = [Scriptblock]::Create($ModuSeq)
 
-Start-Job -Name 'Subscriptions' -ScriptBlock $ScriptBlock -ArgumentList $Subscriptions, $Resources, 'Processing' , $File
+Start-ThreadJob -Name 'Subscriptions' -ScriptBlock $ScriptBlock -ArgumentList $Subscriptions, $Resources, 'Processing' , $File
 
 
 <######################################################### RESOURCES ######################################################################>
@@ -164,31 +156,17 @@ Start-Job -Name 'Subscriptions' -ScriptBlock $ScriptBlock -ArgumentList $Subscri
 
 Write-Output ('Starting Resources Processes')
 
-$Modules = @()
-Write-Output ('Running Online, Gethering List Of Modules for Compute.')
-$OnlineRepoComp = Invoke-WebRequest -Uri ($Repo + '/Compute') -UseBasicParsing
-$RepoComp = $OnlineRepoComp.Links | Where-Object { $_.href -like '*.ps1' }
-$Modules += $RepoComp.href
-Write-Output ('Running Online, Gethering List Of Modules for Networking.')
-$OnlineRepoNetworking = Invoke-WebRequest -Uri ($Repo + '/Networking') -UseBasicParsing
-$RepoNetwork = $OnlineRepoNetworking.Links | Where-Object { $_.href -like '*.ps1' }
-$Modules += $RepoNetwork.href
-Write-Output ('Running Online, Gethering List Of Modules for Database.')
-$OnlineRepoDB = Invoke-WebRequest -Uri ($Repo + '/Data') -UseBasicParsing
-$RepoData = $OnlineRepoDB.Links | Where-Object { $_.href -like '*.ps1' }
-$Modules += $RepoData.href
-Write-Output ('Running Online, Gethering List Of Modules for Infrastructure.')
-$OnlineRepoInfra = Invoke-WebRequest -Uri ($Repo + '/Infrastructure') -UseBasicParsing
-$RepoInfra = $OnlineRepoInfra.Links | Where-Object { $_.href -like '*.ps1' }
-$Modules += $RepoInfra.href
+$OnlineRepo = Invoke-WebRequest -Uri $Repo
+$RepoContent = $OnlineRepo | ConvertFrom-Json
+$Modules = ($RepoContent.tree | Where-Object {$_.path -like '*.ps1' -and $_.path -notlike 'Extras/*' -and $_.path -ne 'AzureResourceInventory.ps1' -and $_.path -notlike 'Automation/*'}).path
 
 foreach ($Module in $Modules) 
     {
         $SmaResources = @{}
 
         $Modul = $Module.split('/')
-        $ModName = $Modul[7].Substring(0, $Modul[7].length - ".ps1".length)
-        $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Modules/' + $Modul[6] + '/' + $Modul[7])
+        $ModName = $Modul[2].Substring(0, $Modul[2].length - ".ps1".length)
+        $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/' + $Module)
 
         $ScriptBlock = [Scriptblock]::Create($ModuSeq)
 
@@ -239,7 +217,7 @@ $ScriptBlock = [Scriptblock]::Create($ModuSeq)
 
 $FileFull = ((Get-Location).Path+'\'+$File)
 
-Invoke-Command -ScriptBlock $ScriptBlock -ArgumentList $FileFull,'Light20','Azure Automation',$Subscriptions,$Resources.Count,$ExtractionRunTime,$ReportingRunTime
+Invoke-Command -ScriptBlock $ScriptBlock -ArgumentList $FileFull,'Light20','Azure Automation',$Subscriptions,$Resources.Count,$ExtractionRunTime,$ReportingRunTime,$RunLite
 
 <######################################################### UPLOAD FILE ######################################################################>
 

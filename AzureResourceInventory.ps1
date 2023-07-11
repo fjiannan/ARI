@@ -2,9 +2,9 @@
 #                                                                                        #
 #                * Azure Resource Inventory ( ARI ) Report Generator *                   #
 #                                                                                        #
-#       Version: 2.3.16                                                                  #
+#       Version: 3.1.03                                                                  #
 #                                                                                        #
-#       Date: 01/09/2022                                                                 #
+#       Date: 07/07/2023                                                                 #
 #                                                                                        #
 ##########################################################################################
 <#
@@ -21,6 +21,12 @@
 
 .PARAMETER SubscriptionID
     Use this parameter to collect a specific Subscription in a Tenant
+
+.PARAMETER ManagementGroup
+    Use this parameter to collect a all Subscriptions in a Specific Management Group in a Tenant
+
+.PARAMETER Lite
+    Use this parameter to use only the Import-Excel module and don't create the charts (using Excel's API)
 
 .PARAMETER SecurityCenter
     Use this parameter to collect Security Center Advisories
@@ -62,20 +68,25 @@
 param ($TenantID,
         [switch]$SecurityCenter, 
         $SubscriptionID, 
+        $ManagementGroup,
         $Appid, 
         $Secret, 
         $ResourceGroup, 
         $TagKey, 
         $TagValue,
-        [switch]$SkipAdvisory, 
+        [switch]$SkipAdvisory,
+        [switch]$SkipPolicy,
         [switch]$IncludeTags, 
         [switch]$QuotaUsage, 
         [switch]$Online, 
-        [switch]$Diagram , 
+        [switch]$Diagram,
+        [switch]$SkipDiagram, 
+        [switch]$Lite,
         [switch]$Debug, 
         [switch]$Help, 
         [switch]$DeviceLogin, 
-        $AzureEnvironment, 
+        $AzureEnvironment,
+        [switch]$DiagramFullEnvironment,
         $ReportName = 'AzureResourceInventory', 
         $ReportDir)
 
@@ -86,6 +97,10 @@ param ($TenantID,
     Write-Debug ('Debbuging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
 
     if ($IncludeTags.IsPresent) { $Global:InTag = $true } else { $Global:InTag = $false }
+
+    if ($Online.IsPresent) { $Global:RunOnline = $true }else { $Global:RunOnline = $false }
+    if ($Lite.IsPresent) { $Global:RunLite = $true }else { $Global:RunLite = $false }
+    if ($DiagramFullEnvironment.IsPresent) {$Global:FullEnv = $true}else{$Global:FullEnv = $false}
 
     $Global:SRuntime = Measure-Command -Expression {
 
@@ -157,16 +172,38 @@ param ($TenantID,
 
     Function Variables {
         Write-Debug ('Cleaning default variables')
+        $Global:ResourceContainers = @()
         $Global:Resources = @()
         $Global:Advisories = @()
         $Global:Security = @()
+        $Global:Policies = @()
         $Global:Subscriptions = ''
-        $Global:ReportName = $ReportName
+        $Global:ReportName = $ReportName        
 
-        if ($Online.IsPresent) { $Global:RunOnline = $true }else { $Global:RunOnline = $false }
-
-        $Global:Repo = 'https://github.com/microsoft/ARI/tree/main/Modules'
+        $Global:Repo = 'https://api.github.com/repos/microsoft/ari/git/trees/main?recursive=1'
         $Global:RawRepo = 'https://raw.githubusercontent.com/microsoft/ARI/main'
+
+        Write-Debug ('Checking if -Online parameter will have to be forced.')
+        if(!$Online.IsPresent)
+            {
+                if($PSScriptRoot -like '*\*')
+                    {
+                        $LocalFilesValidation = New-Object System.IO.StreamReader($PSScriptRoot + '\Extras\Subscriptions.ps1')
+                    }
+                else
+                    {
+                        $LocalFilesValidation = New-Object System.IO.StreamReader($PSScriptRoot + '/Extras/Subscriptions.ps1')
+                    } 
+                if([string]::IsNullOrEmpty($LocalFilesValidation))
+                    {
+                        Write-Debug ('Using -Online by force.')
+                        $Global:RunOnline = $true
+                    }
+                else
+                    {
+                        $Global:RunOnline = $false
+                    }
+                }
 
     }
 
@@ -174,7 +211,6 @@ param ($TenantID,
 
     Function Extractor {
 
-        Write-Debug ('Starting Extractor function')
         Write-Debug ('Starting Extractor function')
         function checkAzCli() {
             Write-Debug ('Starting checkAzCli function')
@@ -347,6 +383,7 @@ param ($TenantID,
                                 }
                         }
                 $Global:DefaultPath = if($ReportDir) {$ReportDir} else {"$HOME/AzureResourceInventory/"}
+                $Global:DiagramCache = if($ReportDir) {$ReportDir} else {"$HOME/AzureResourceInventory/DiagramCache/"}
                 $Global:Subscriptions = az account list --output json --only-show-errors | ConvertFrom-Json
             }
             else
@@ -376,6 +413,7 @@ param ($TenantID,
                                 }
                         }
                     $Global:DefaultPath = if($ReportDir) {$ReportDir} else {"$HOME/AzureResourceInventory/"}
+                    $Global:DiagramCache = if($ReportDir) {$ReportDir} else {"$HOME/AzureResourceInventory/DiagramCache/"}
                     LoginSession
                 }
                 else {
@@ -403,6 +441,7 @@ param ($TenantID,
                                 }
                         }
                     $Global:DefaultPath = if($ReportDir) {$ReportDir} else {"C:\AzureResourceInventory\"}
+                    $Global:DiagramCache = if($ReportDir) {$ReportDir} else {"C:\AzureResourceInventory\DiagramCache\"}
                     LoginSession
                 }
             }
@@ -426,7 +465,55 @@ param ($TenantID,
 
         Write-Progress -activity 'Azure Inventory' -Status "1% Complete." -PercentComplete 2 -CurrentOperation 'Discovering Subscriptions..'
 
-        $SubCount = $Subscriptions.count
+        if (![string]::IsNullOrEmpty($ManagementGroup))
+            {
+                Write-Debug ('Management group name supplied: ' + $ManagmentGroupName)
+                $group = az account management-group entities list --query "[?name =='$ManagementGroup']" | ConvertFrom-Json
+                if ($group.Count -lt 1)
+                {
+                    Write-Host "ERROR:" -NoNewline -ForegroundColor Red
+                    Write-Host "Management Group $ManagementGroup not found!"
+                    Write-Host ""
+                    Write-Host "Please check the Management Group name and try again."
+                    Write-Host ""
+                    Exit
+                }
+                else
+                {
+                    Write-Debug ('Management groups found: ' + $group.count)
+                    foreach ($item in $group)
+                    {
+                        $Global:Subscriptions = @()
+                        $GraphQuery = "resourcecontainers | where type == 'microsoft.resources/subscriptions' | mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$($item.name)' | summarize count()"
+                        $EnvSize = az graph query -q $GraphQuery --output json --only-show-errors | ConvertFrom-Json
+                        $EnvSizeNum = $EnvSize.data.'count_'
+
+                        if ($EnvSizeNum -ge 1) {
+                            $Loop = $EnvSizeNum / 1000
+                            $Loop = [math]::ceiling($Loop)
+                            $Looper = 0
+                            $Limit = 0
+
+                            while ($Looper -lt $Loop) {
+                                $GraphQuery = "resourcecontainers | where type == 'microsoft.resources/subscriptions' | mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$($item.name)' | project id = subscriptionId"
+                                $Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+
+                                foreach ($Sub in $Resource.data) {
+                                    $Global:Subscriptions += az account show --subscription $Sub.id --output json --only-show-errors | ConvertFrom-Json
+                                }
+
+                                Start-Sleep 2
+                                $Looper ++
+                                Write-Progress -Id 1 -activity "Running Subscription Inventory Job" -Status "$Looper / $Loop of Subscription Jobs" -PercentComplete (($Looper / $Loop) * 100)
+                                $Limit = $Limit + 1000
+                            }
+                        }
+                        Write-Progress -Id 1 -activity "Running Subscription Inventory Job" -Status "$Looper / $Loop of Subscription Jobs" -Completed
+                    }                    
+                }
+            }
+
+        $SubCount = $Global:Subscriptions.count
 
         Write-Debug ('Number of Subscriptions Found: ' + $SubCount)
         Write-Progress -activity 'Azure Inventory' -Status "3% Complete." -PercentComplete 3 -CurrentOperation "$SubCount Subscriptions found.."
@@ -434,6 +521,9 @@ param ($TenantID,
         Write-Debug ('Checking report folder: ' + $DefaultPath )
         if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false) {
             New-Item -Type Directory -Force -Path $DefaultPath | Out-Null
+        }
+        if ((Test-Path -Path $DiagramCache -PathType Container) -eq $false) {
+            New-Item -Type Directory -Force -Path $DiagramCache | Out-Null
         }
 
         <######################################################## INVENTORY LOOPs #######################################################################>
@@ -534,7 +624,12 @@ param ($TenantID,
             } 
         else 
             {
-                $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | summarize count()"
+                $GraphQueryExtension = ""
+                if (![string]::IsNullOrEmpty($ManagementGroup)) {
+                    $GraphQueryExtension = "| join kind=inner (resourcecontainers | where type == 'microsoft.resources/subscriptions' | mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$ManagementGroup' | project subscriptionId, managanagementGroup = managementGroupParent.name) on subscriptionId"
+                }
+                $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 $GraphQueryExtension | summarize count()"
+                
                 #$EnvSize = az graph query -q  $GraphQuery --output json --subscriptions $SubscriptionID --only-show-errors | ConvertFrom-Json
                 $EnvSize = az graph query -q  $GraphQuery --output json --only-show-errors | ConvertFrom-Json
                 $EnvSizeNum = $EnvSize.data.'count_'
@@ -546,7 +641,7 @@ param ($TenantID,
                     $Limit = 0
 
                     while ($Looper -lt $Loop) {
-                        $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation$($GraphQueryTags) | order by id asc"
+                        $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 $GraphQueryExtension | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation$($GraphQueryTags) | order by id asc"
                         #$Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --subscriptions $SubscriptionID --only-show-errors).tolower() | ConvertFrom-Json
                         $Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
@@ -559,6 +654,35 @@ param ($TenantID,
                 }
                 Write-Progress -Id 1 -activity "Running Resource Inventory Job" -Status "$Looper / $Loop of Inventory Jobs" -Completed
             }
+
+        <######################################################### RESOURCE CONTAINER ######################################################################>
+
+            $GraphQueryExtension = ""
+            if (![string]::IsNullOrEmpty($ManagementGroup)) {
+                $GraphQueryExtension = "| mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$ManagementGroup'"
+            }
+            $GraphQuery = "resourcecontainers $GraphQueryExtension | summarize count()"
+            $EnvSize = az graph query -q  $GraphQuery --output json --only-show-errors | ConvertFrom-Json
+            $EnvSizeNum = $EnvSize.data.'count_'
+
+            if ($EnvSizeNum -ge 1) {
+                $Loop = $EnvSizeNum / 1000
+                $Loop = [math]::ceiling($Loop)
+                $Looper = 0
+                $Limit = 0
+
+                while ($Looper -lt $Loop) {
+                    $GraphQuery = "resourcecontainers $GraphQueryExtension | order by id asc"
+                    $Container = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+
+                    $Global:ResourceContainers += $Container.data
+                    Start-Sleep 2
+                    $Looper ++
+                    Write-Progress -Id 1 -activity "Running Subscription Inventory Job" -Status "$Looper / $Loop of Inventory Jobs" -PercentComplete (($Looper / $Loop) * 100)
+                    $Limit = $Limit + 1000
+                }
+            }
+            Write-Progress -Id 1 -activity "Running Subscription Inventory Job" -Status "$Looper / $Loop of Inventory Jobs" -Completed
 
 
         <######################################################### QUOTA JOB ######################################################################>
@@ -609,6 +733,41 @@ param ($TenantID,
                 } -ArgumentList $Global:Resources, $Global:Subscriptions
             }
 
+        <######################################################### Policies ######################################################################>
+
+            if (!($SkipPolicy.IsPresent)) {                
+
+                $GraphQuery = "policyresources | where type == 'microsoft.authorization/policyassignments' | summarize count()"
+    
+                $PolSize = az graph query -q $GraphQuery -m $TenantID --output json --only-show-errors | ConvertFrom-Json
+                $PolSizeNum = $PolSize.data.'count_'
+    
+                Write-Debug ('Policy: '+$PolSizeNum)
+                Write-Progress -activity 'Azure Inventory' -Status "5% Complete." -PercentComplete 5 -CurrentOperation "Starting Policy extraction jobs.."
+    
+                if ($PolSizeNum -ge 1) {
+                    $Loop = $PolSizeNum / 1000
+                    $Loop = [math]::ceiling($Loop)
+                    $Looper = 0
+                    $Limit = 0
+    
+                    while ($Looper -lt $Loop) {
+                        $Looper ++
+                        Write-Progress -Id 1 -activity "Running Policy Inventory Job" -Status "$Looper / $Loop of Inventory Jobs" -PercentComplete (($Looper / $Loop) * 100)
+                        $GraphQuery = "policyresources | where type == 'microsoft.authorization/policyassignments' | order by id asc"
+    
+                        $Policy = (az graph query -q $GraphQuery -m $TenantID --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+    
+                        $Global:Policies += $Policy.data
+                        Start-Sleep 2
+                        $Limit = $Limit + 1000
+                    }
+                    Write-Progress -Id 1 -activity "Running Policy Inventory Job" -Status "Completed" -Completed
+                }
+    
+            }
+
+
         <######################################################### ADVISOR ######################################################################>
 
         $Global:ExtractionRuntime = Measure-Command -Expression {
@@ -618,15 +777,19 @@ param ($TenantID,
         if (!($SkipAdvisory.IsPresent)) {
 
             Write-Debug ('Subscriptions To be Gather in Advisories: '+$Subscri.Count)
-                if ([string]::IsNullOrEmpty($ResourceGroup)) {
-                    Write-Debug ('Resource Group name is not present, extracting advisories for all Resource Groups')
-                    $GraphQuery = "advisorresources | summarize count()"
-                } else {
-                    $GraphQuery = "advisorresources | where resourceGroup == '$ResourceGroup' | summarize count()"
-                }
-                #$AdvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
-                $AdvSize = az graph query -q $GraphQuery --output json --only-show-errors | ConvertFrom-Json
-                $AdvSizeNum = $AdvSize.data.'count_'
+            
+            $GraphQueryExtension = ""
+            if (![string]::IsNullOrEmpty($ManagementGroup)) {
+                $GraphQueryExtension = "| join kind=inner (resourcecontainers | where type == 'microsoft.resources/subscriptions' | mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$ManagementGroup' | project subscriptionId, managanagementGroup = managementGroupParent.name) on subscriptionId"
+            }
+            if (![string]::IsNullOrEmpty($ResourceGroup)) {
+                $GraphQueryExtension = "$GraphQueryExtension | where resourceGroup == '$ResourceGroup'"
+            }
+            $GraphQuery = "advisorresources $GraphQueryExtension | summarize count()"
+
+            #$AdvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
+            $AdvSize = az graph query -q $GraphQuery --output json --only-show-errors | ConvertFrom-Json
+            $AdvSizeNum = $AdvSize.data.'count_'
 
             Write-Debug ('Advisories: '+$AdvSizeNum)
             Write-Progress -activity 'Azure Inventory' -Status "5% Complete." -PercentComplete 5 -CurrentOperation "Starting Advisories extraction jobs.."
@@ -640,14 +803,10 @@ param ($TenantID,
                 while ($Looper -lt $Loop) {
                     $Looper ++
                     Write-Progress -Id 1 -activity "Running Advisory Inventory Job" -Status "$Looper / $Loop of Inventory Jobs" -PercentComplete (($Looper / $Loop) * 100)
-                        if ([string]::IsNullOrEmpty($ResourceGroup)) {
-                            $GraphQuery = "advisorresources | order by id asc"
-                        } else {
-                            $GraphQuery = "advisorresources | where resourceGroup == '$ResourceGroup' | order by id asc"
-                                }
-                        
-                #$Advisor = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
-                $Advisor = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $GraphQuery = "advisorresources $GraphQueryExtension | order by id asc"
+
+                    #$Advisor = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Advisor = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
                     $Global:Advisories += $Advisor.data
                     Start-Sleep 2
@@ -655,6 +814,8 @@ param ($TenantID,
                 }
                 Write-Progress -Id 1 -activity "Running Advisory Inventory Job" -Status "Completed" -Completed
             }
+
+            $Global:Advisories = $Global:Advisories | Where-Object {$_.subscriptionid -in $Subscri}
         }
 
         <######################################################### Security Center ######################################################################>
@@ -668,8 +829,15 @@ param ($TenantID,
             $Subscri = $Global:Subscriptions.id
 
             Write-Debug ('Extracting total number of Security Advisories from Tenant')
+            $GraphQueryExtension = ""
+            if (![string]::IsNullOrEmpty($ManagementGroup)) {
+                $GraphQueryExtension = "| join kind=inner (resourcecontainers | where type == 'microsoft.resources/subscriptions' | mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$ManagementGroup' | project subscriptionId, managanagementGroup = managementGroupParent.name) on subscriptionId"
+            }
+            if (![string]::IsNullOrEmpty($ResourceGroup)) {
+                $GraphQueryExtension = "$GraphQueryExtension | where resourceGroup == '$ResourceGroup'"
+            }
             #$SecSize = az graph query -q  "securityresources | where properties['status']['code'] == 'Unhealthy' | summarize count()" --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
-            $SecSize = az graph query -q  "securityresources | where properties['status']['code'] == 'Unhealthy' | summarize count()" --output json --only-show-errors | ConvertFrom-Json
+            $SecSize = az graph query -q  "securityresources $GraphQueryExtension | where properties['status']['code'] == 'Unhealthy' | summarize count()" --output json --only-show-errors | ConvertFrom-Json
             $SecSizeNum = $SecSize.data.'count_'            
 
             if ($SecSizeNum -ge 1) {
@@ -680,7 +848,7 @@ param ($TenantID,
                 while ($Looper -lt $Loop) {
                     $Looper ++
                     Write-Progress -Id 1 -activity "Running Security Advisory Inventory Job" -Status "$Looper / $Loop of Inventory Jobs" -PercentComplete (($Looper / $Loop) * 100)
-                    $GraphQuery = "securityresources | where properties['status']['code'] == 'Unhealthy' | order by id asc"
+                    $GraphQuery = "securityresources $GraphQueryExtension | where properties['status']['code'] == 'Unhealthy' | order by id asc"
                 
                     #$SecCenter = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
                     $SecCenter = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
@@ -706,9 +874,15 @@ param ($TenantID,
 
 
         $Subscri = $Global:Subscriptions.id
-
+        $GraphQueryExtension = ""
+        if (![string]::IsNullOrEmpty($ManagementGroup)) {
+            $GraphQueryExtension = "| join kind=inner (resourcecontainers | where type == 'microsoft.resources/subscriptions' | mv-expand managementGroupParent = properties.managementGroupAncestorsChain | where managementGroupParent.name =~ '$ManagementGroup' | project subscriptionId, managanagementGroup = managementGroupParent.name) on subscriptionId"
+        }
+        if (![string]::IsNullOrEmpty($ResourceGroup)) {
+            $GraphQueryExtension = "$GraphQueryExtension | where resourceGroup == '$ResourceGroup'"
+        }
         #$AVDSize = az graph query -q "desktopvirtualizationresources | summarize count()" --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
-        $AVDSize = az graph query -q "desktopvirtualizationresources | summarize count()" --output json --only-show-errors | ConvertFrom-Json
+        $AVDSize = az graph query -q "desktopvirtualizationresources $GraphQueryExtension | summarize count()" --output json --only-show-errors | ConvertFrom-Json
         $AVDSizeNum = $AVDSize.data.'count_'
 
         if ($AVDSizeNum -ge 1) {
@@ -718,7 +892,7 @@ param ($TenantID,
             $Limit = 0
 
             while ($Looper -lt $Loop) {
-                $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation$($GraphQueryTags) | order by id asc"
+                $GraphQuery = "desktopvirtualizationresources $GraphQueryExtension | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation$($GraphQueryTags) | order by id asc"
                 #$AVD = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
                 $AVD = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
@@ -782,12 +956,12 @@ param ($TenantID,
         <######################################################### DRAW.IO DIAGRAM JOB ######################################################################>
 
         Write-Debug ('Checking if Draw.io Diagram Job Should be Run.')
-        if ($Diagram.IsPresent) {
+        if (!$SkipDiagram.IsPresent) {
             Write-Debug ('Starting Draw.io Diagram Processing Job.')
             Start-job -Name 'DrawDiagram' -ScriptBlock {
 
-                If ($($args[5]) -eq $true) {
-                    $ModuSeq = (New-Object System.Net.WebClient).DownloadString($($args[7]) + '/Extras/DrawIODiagram.ps1')
+                If ($($args[8]) -eq $true) {
+                    $ModuSeq = (New-Object System.Net.WebClient).DownloadString($($args[10]) + '/Extras/DrawIODiagram.ps1')
                 }
                 Else {
                     if($($args[0]) -like '*\*')
@@ -805,17 +979,17 @@ param ($TenantID,
                     
                 $ScriptBlock = [Scriptblock]::Create($ModuSeq)
                     
-                $DrawRun = ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($($args[1])).AddArgument($($args[2] | ConvertFrom-Json)).AddArgument($($args[3])).AddArgument($($args[4]))
+                $DrawRun = ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($($args[1])).AddArgument($($args[2] | ConvertFrom-Json)).AddArgument($($args[3])).AddArgument($($args[4])).AddArgument($($args[5])).AddArgument($($args[6])).AddArgument($($args[7]))
 
                 $DrawJob = $DrawRun.BeginInvoke()
 
-                while ($DrawJob.IsCompleted -contains $false) {}
+                while ($DrawJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
                 $DrawRun.EndInvoke($DrawJob)
 
                 $DrawRun.Dispose()
 
-            } -ArgumentList $PSScriptRoot, $Subscriptions, ($Resources | ConvertTo-Json -Depth 50), $Advisories, $DDFile, $RunOnline, $Repo, $RawRepo   | Out-Null
+            } -ArgumentList $PSScriptRoot, $Subscriptions, ($Resources | ConvertTo-Json -Depth 50), $Advisories, $DDFile, $DiagramCache, $FullEnv, $ResourceContainers ,$RunOnline, $Repo, $RawRepo   | Out-Null
         }
 
         <######################################################### VISIO DIAGRAM JOB ######################################################################>
@@ -880,7 +1054,7 @@ param ($TenantID,
 
                 $SecJob = $SecRun.BeginInvoke()
 
-                while ($SecJob.IsCompleted -contains $false) {}
+                while ($SecJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
                 $SecResult = $SecRun.EndInvoke($SecJob)
 
@@ -889,6 +1063,46 @@ param ($TenantID,
                 $SecResult
 
             } -ArgumentList $PSScriptRoot, $Subscriptions , $Security, 'Processing' , $File, $RunOnline, $RawRepo | Out-Null
+        }
+
+        <######################################################### POLICY JOB ######################################################################>
+
+        Write-Debug ('Checking If Should Run Policy Job.')
+        if (!$SkipPolicy.IsPresent) {
+            Write-Debug ('Starting Policy Processing Job.')
+            Start-Job -Name 'Policy' -ScriptBlock {
+
+                If ($($args[5]) -eq $true) {
+                    $ModuSeq = (New-Object System.Net.WebClient).DownloadString($($args[6]) + '/Extras/Policy.ps1')
+                }
+                Else {
+                    if($($args[0]) -like '*\*')
+                        {
+                            $ModuSeq0 = New-Object System.IO.StreamReader($($args[0]) + '\Extras\Policy.ps1')
+                        }
+                        else
+                        {
+                            $ModuSeq0 = New-Object System.IO.StreamReader($($args[0]) + '/Extras/Policy.ps1')
+                        }
+                    $ModuSeq = $ModuSeq0.ReadToEnd()
+                    $ModuSeq0.Dispose()
+                }
+
+                $ScriptBlock = [Scriptblock]::Create($ModuSeq)
+
+                $PolRun = ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($($args[1])).AddArgument($($args[2])).AddArgument($($args[3])).AddArgument($($args[4]))
+
+                $PolJob = $PolRun.BeginInvoke()
+
+                while ($PolJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
+
+                $PolResult = $PolRun.EndInvoke($PolJob)
+
+                $PolRun.Dispose()
+
+                $PolResult
+
+            } -ArgumentList $PSScriptRoot, $Policies, 'Processing', $Subscriptions, $File, $RunOnline, $RawRepo | Out-Null
         }
 
         <######################################################### ADVISORY JOB ######################################################################>
@@ -920,7 +1134,7 @@ param ($TenantID,
 
                 $AdvJob = $AdvRun.BeginInvoke()
 
-                while ($AdvJob.IsCompleted -contains $false) {}
+                while ($AdvJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
                 $AdvResult = $AdvRun.EndInvoke($AdvJob)
 
@@ -958,7 +1172,7 @@ param ($TenantID,
 
             $SubJob = $SubRun.BeginInvoke()
 
-            while ($SubJob.IsCompleted -contains $false) {}
+            while ($SubJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
             $SubResult = $SubRun.EndInvoke($SubJob)
 
@@ -990,14 +1204,9 @@ param ($TenantID,
                     $RawRepo = $($args[11])
 
                     If ($($args[9]) -eq $true) {
-                        $ResourceJobs = 'Compute', 'Analytics', 'Containers', 'Data', 'Infrastructure', 'Integration', 'Networking', 'Storage'
-                        $Modules = @()
-                        Foreach ($Jobs in $ResourceJobs)
-                            {
-                                $OnlineRepo = Invoke-WebRequest -Uri ($Repo + '/' + $Jobs)
-                                $Modu = $OnlineRepo.Links | Where-Object { $_.href -like '*.ps1' }
-                                $Modules += $Modu.href
-                            }
+                        $OnlineRepo = Invoke-WebRequest -Uri $Repo
+                        $RepoContent = $OnlineRepo | ConvertFrom-Json
+                        $Modules = ($RepoContent.tree | Where-Object {$_.path -like '*.ps1' -and $_.path -notlike 'Extras/*' -and $_.path -ne 'AzureResourceInventory.ps1' -and $_.path -notlike 'Automation/*'}).path
                     }
                     Else {
                         if($($args[1]) -like '*\*')
@@ -1013,14 +1222,14 @@ param ($TenantID,
 
                     foreach ($Module in $Modules) {
                         If ($($args[9]) -eq $true) {
-                            $Modul = $Module.split('/')
-                                $ModName = $Modul[7].Substring(0, $Modul[7].length - ".ps1".length)
-                            $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Modules/' + $Modul[6] + '/' + $Modul[7])
+                                $Modul = $Module.split('/')
+                                $ModName = $Modul[2].Substring(0, $Modul[2].length - ".ps1".length)
+                                $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/' + $Module)
                             } Else {
                                 $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
-                            $ModuSeq0 = New-Object System.IO.StreamReader($Module.FullName)
-                            $ModuSeq = $ModuSeq0.ReadToEnd()
-                            $ModuSeq0.Dispose()
+                                $ModuSeq0 = New-Object System.IO.StreamReader($Module.FullName)
+                                $ModuSeq = $ModuSeq0.ReadToEnd()
+                                $ModuSeq0.Dispose()
                         }
 
                         $ScriptBlock = [Scriptblock]::Create($ModuSeq)
@@ -1028,19 +1237,19 @@ param ($TenantID,
                         New-Variable -Name ('ModRun' + $ModName)
                         New-Variable -Name ('ModJob' + $ModName)
 
-                        Set-Variable -Name ('ModRun' + $ModName) -Value ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($($args[1])).AddArgument($($args[2])).AddArgument($($args[3])).AddArgument($($args[4] | ConvertFrom-Json)).AddArgument($($args[5])).AddArgument($null).AddArgument($null).AddArgument($null).AddArgument($null)
+                        Set-Variable -Name ('ModRun' + $ModName) -Value ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($($args[1])).AddArgument($($args[2])).AddArgument($($args[3])).AddArgument($($args[4] | ConvertFrom-Json)).AddArgument($($args[5])).AddArgument($null).AddArgument($null).AddArgument($null).AddArgument($($args[12]))
 
                         Set-Variable -Name ('ModJob' + $ModName) -Value ((get-variable -name ('ModRun' + $ModName)).Value).BeginInvoke()
 
                         $job += (get-variable -name ('ModJob' + $ModName)).Value
                     }
 
-                    while ($Job.Runspace.IsCompleted -contains $false) {}
+                    while ($Job.Runspace.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
                     foreach ($Module in $Modules) {
                         If ($($args[9]) -eq $true) {
-                            $Modul = $Module.split('/')
-                                $ModName = $Modul[7].Substring(0, $Modul[7].length - ".ps1".length)
+                                $Modul = $Module.split('/')
+                                $ModName = $Modul[2].Substring(0, $Modul[2].length - ".ps1".length)
                             } Else {
                                 $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
                         }
@@ -1053,8 +1262,8 @@ param ($TenantID,
 
                     foreach ($Module in $Modules) {
                         If ($($args[9]) -eq $true) {
-                            $Modul = $Module.split('/')
-                                $ModName = $Modul[7].Substring(0, $Modul[7].length - ".ps1".length)
+                                $Modul = $Module.split('/')
+                                $ModName = $Modul[2].Substring(0, $Modul[2].length - ".ps1".length)
                             } Else {
                                 $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
                         }
@@ -1062,7 +1271,7 @@ param ($TenantID,
                     }
 
                 $Hashtable
-                } -ArgumentList $null, $PSScriptRoot, $Subscriptions, $InTag, ($Resource | ConvertTo-Json -Depth 50), 'Processing', $null, $null, $null, $RunOnline, $Repo, $RawRepo | Out-Null                    
+                } -ArgumentList $null, $PSScriptRoot, $Subscriptions, $InTag, ($Resource | ConvertTo-Json -Depth 50), 'Processing', $null, $null, $null, $RunOnline, $Repo, $RawRepo, $Unsupported | Out-Null                    
                 $Limit = $Limit + 1000   
             }
 
@@ -1108,17 +1317,10 @@ param ($TenantID,
         Write-Debug ('Starting Reporting Phase.')
         Write-Progress -activity $DataActive -Status "Processing Inventory" -PercentComplete 50
 
-        $ResourceJobs = 'Compute', 'Analytics', 'Containers', 'Data', 'Infrastructure', 'Integration', 'Networking', 'Storage'
-
         If ($RunOnline -eq $true) {
-            $Modules = @()
-            Foreach ($Module in $ResourceJobs)
-                {
-                    Write-Debug ('Running Online, Gethering List Of Modules for '+$Module+'.')
-                    $OnlineRepo = Invoke-WebRequest -Uri ($Repo + '/' + $Module)
-                    $RepoFolder = $OnlineRepo.Links | Where-Object { $_.href -like '*.ps1' }
-                    $Modules += $RepoFolder.href
-                }
+            $OnlineRepo = Invoke-WebRequest -Uri $Repo
+            $RepoContent = $OnlineRepo | ConvertFrom-Json
+            $Modules = ($RepoContent.tree | Where-Object {$_.path -like '*.ps1' -and $_.path -notlike 'Extras/*' -and $_.path -ne 'AzureResourceInventory.ps1' -and $_.path -notlike 'Automation/*'}).path
         }
         Else {
             Write-Debug ('Running Offline, Gathering List Of Modules.')
@@ -1143,13 +1345,13 @@ param ($TenantID,
             Write-Progress -Id 1 -activity "Building Report" -Status "$c% Complete." -PercentComplete $c
 
             If ($RunOnline -eq $true) {
-                $Modul = $Module.split('/')
-                    $ModName = $Modul[7].Substring(0, $Modul[7].length - ".ps1".length)
-                $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Modules/' + $Modul[6] + '/' + $Modul[7])
+                    $Modul = $Module.split('/')
+                    $ModName = $Modul[2]
+                    $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/' + $Module)
                 } Else {
-                $ModuSeq0 = New-Object System.IO.StreamReader($Module.FullName)
-                $ModuSeq = $ModuSeq0.ReadToEnd()
-                $ModuSeq0.Dispose()
+                    $ModuSeq0 = New-Object System.IO.StreamReader($Module.FullName)
+                    $ModuSeq = $ModuSeq0.ReadToEnd()
+                    $ModuSeq0.Dispose()
             }
 
                 Write-Debug "Running Module: '$Module'"
@@ -1160,7 +1362,7 @@ param ($TenantID,
 
             $ExcelJob = $ExcelRun.BeginInvoke()
 
-            while ($ExcelJob.IsCompleted -contains $false) {}
+            while ($ExcelJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
             $ExcelRun.EndInvoke($ExcelJob)
 
@@ -1210,7 +1412,7 @@ param ($TenantID,
 
                 $QuotaJob = $QuotaRun.BeginInvoke()
 
-                while ($QuotaJob.IsCompleted -contains $false) {}
+                while ($QuotaJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
                 $QuotaRun.EndInvoke($QuotaJob)
 
@@ -1263,12 +1465,64 @@ param ($TenantID,
 
             $SecExcelJob = $SecExcelRun.BeginInvoke()
 
-            while ($SecExcelJob.IsCompleted -contains $false) {}
+            while ($SecExcelJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
             $SecExcelRun.EndInvoke($SecExcelJob)
 
             $SecExcelRun.Dispose()
         }
+
+
+        <################################################ POLICY #######################################################>
+        #### Policy worksheet is generated apart from the resources
+        Write-Debug ('Checking if Should Generate Policy Sheet.')
+        if (!$SkipPolicy.IsPresent) {
+            Write-Debug ('Generating Policy Sheet.')
+            $Global:polco = $Policies.count
+
+            Write-Progress -activity $DataActive -Status "Building Policy Report" -PercentComplete 0 -CurrentOperation "Considering $polco Policies"
+
+            while (get-job -Name 'Policy' | Where-Object { $_.State -eq 'Running' }) {
+                Write-Progress -Id 1 -activity 'Processing Policies' -Status "50% Complete." -PercentComplete 50
+                Write-Debug ('Policy Job is: '+(get-job -Name 'Policy').State)
+                Start-Sleep -Seconds 2
+            }
+            Write-Progress -Id 1 -activity 'Processing Policies'  -Status "100% Complete." -Completed
+
+            $Global:Pol = Receive-Job -Name 'Policy'
+
+            If ($RunOnline -eq $true) {
+                Write-Debug ('Looking for the following file: '+$RawRepo + '/Extras/Policy.ps1')
+                $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extras/Policy.ps1')
+            }
+            Else {
+                if($PSScriptRoot -like '*\*')
+                    {
+                        Write-Debug ('Looking for the following file: '+$PSScriptRoot + '\Extras\Policy.ps1')
+                        $ModuSeq0 = New-Object System.IO.StreamReader($PSScriptRoot + '\Extras\Policy.ps1')
+                    }
+                else
+                    {
+                        Write-Debug ('Looking for the following file: '+$PSScriptRoot + '/Extras/Policy.ps1')
+                        $ModuSeq0 = New-Object System.IO.StreamReader($PSScriptRoot + '/Extras/Policy.ps1')
+                    }
+                $ModuSeq = $ModuSeq0.ReadToEnd()
+                $ModuSeq0.Dispose()
+            }
+
+            $ScriptBlock = [Scriptblock]::Create($ModuSeq)
+
+            $PolExcelRun = ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($null).AddArgument('Reporting').AddArgument($null).AddArgument($file).AddArgument($Pol).AddArgument($TableStyle)
+
+            $PolExcelJob = $PolExcelRun.BeginInvoke()
+
+            while ($PolExcelJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
+
+            $PolExcelRun.EndInvoke($PolExcelJob)
+
+            $PolExcelRun.Dispose()
+        }
+
 
         <################################################ ADVISOR #######################################################>
         #### Advisor worksheet is generated apart from the resources
@@ -1313,7 +1567,7 @@ param ($TenantID,
 
             $AdvExcelJob = $AdvExcelRun.BeginInvoke()
 
-            while ($AdvExcelJob.IsCompleted -contains $false) {}
+            while ($AdvExcelJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
             $AdvExcelRun.EndInvoke($AdvExcelJob)
 
@@ -1351,7 +1605,7 @@ param ($TenantID,
 
         $SubsJob = $SubsRun.BeginInvoke()
 
-        while ($SubsJob.IsCompleted -contains $false) {}
+        while ($SubsJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
         $SubsRun.EndInvoke($SubsJob)
 
@@ -1390,13 +1644,13 @@ param ($TenantID,
 
         Write-Progress -activity 'Azure Resource Inventory Reporting Charts' -Status "15% Complete." -PercentComplete 15 -CurrentOperation "Invoking Excel Chart's Thread."
 
-        $ChartsRun = ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($file).AddArgument($TableStyle).AddArgument($Global:PlatOS).AddArgument($Global:Subscriptions).AddArgument($Global:Resources.Count).AddArgument($ExtractionRunTime).AddArgument($ReportingRunTime)
+        $ChartsRun = ([PowerShell]::Create()).AddScript($ScriptBlock).AddArgument($file).AddArgument($TableStyle).AddArgument($Global:PlatOS).AddArgument($Global:Subscriptions).AddArgument($Global:Resources.Count).AddArgument($ExtractionRunTime).AddArgument($ReportingRunTime).AddArgument($RunLite)
 
         $ChartsJob = $ChartsRun.BeginInvoke()
 
         Write-Progress -activity 'Azure Resource Inventory Reporting Charts' -Status "30% Complete." -PercentComplete 30 -CurrentOperation "Waiting Excel Chart's Thread."
 
-        while ($ChartsJob.IsCompleted -contains $false) {}
+        while ($ChartsJob.IsCompleted -contains $false) { Start-Sleep -Milliseconds 100 }
 
         $ChartsRun.EndInvoke($ChartsJob)
 
@@ -1435,37 +1689,39 @@ param ($TenantID,
         RunMain
     }
 
-    $Global:VisioCheck = Get-ChildItem -Path $DFile -ErrorAction SilentlyContinue
 }
 
 $Measure = $Global:SRuntime.Totalminutes.ToString('#######.##')
 
-Write-Host ('Report Complete. Total Runtime was: ' + $Measure + ' Minutes')
+Write-Host ('Report Complete. Total Runtime was: ') -NoNewline
+Write-Host $Measure -NoNewline -ForegroundColor Cyan
+Write-Host (' Minutes')
 Write-Host ('Total Resources: ') -NoNewline
 write-host $Resources.count -ForegroundColor Cyan
-if (!$SkipAdvisory.IsPresent) {
-Write-Host ('Total Advisories: ') -NoNewline
-write-host $advco -ForegroundColor Cyan
-}
-if ($SecurityCenter.IsPresent) {
-    Write-Host ('Total Security Advisories: ' + $Secadvco)
-}
+if (!$SkipAdvisory.IsPresent) 
+    {
+        Write-Host ('Total Advisories: ') -NoNewline
+        write-host $advco -ForegroundColor Cyan
+    }
+if (!$SkipPolicy.IsPresent) 
+    {
+        Write-Host ('Total Policies: ') -NoNewline
+        write-host $polco -ForegroundColor Cyan
+    }
+if ($SecurityCenter.IsPresent) 
+    {
+        Write-Host ('Total Security Advisories: ' + $Secadvco)
+    }
 
 Write-Host ''
 Write-Host ('Excel file saved at: ') -NoNewline
 write-host $File -ForegroundColor Cyan
 Write-Host ''
 
-if(($Global:PlatOS -eq 'PowerShell Desktop' -or $Global:PlatOS -eq 'PowerShell Unix') -and $Diagram.IsPresent) {
-    Write-Host ('Draw.io Diagram file saved at: ') -NoNewline
-    write-host $DDFile -ForegroundColor Cyan
-    Write-Host ''
+if(!$SkipDiagram.IsPresent) 
+    {
+        Write-Host ('Draw.io Diagram file saved at: ') -NoNewline
+        write-host $DDFile -ForegroundColor Cyan
+        Write-Host ''
     }
 
-<#
-if ($Diagram.IsPresent -and $Global:VisioCheck) {
-    Write-Host ('Visio file saved at: ') -NoNewline
-    write-host $DFile -ForegroundColor Cyan
-    Write-Host ''
-}
-#>

@@ -1,13 +1,13 @@
 <#
 .Synopsis
-Inventory for Azure Databricks
+Inventory for Azure Machine Learning
 
 .DESCRIPTION
-This script consolidates information for all microsoft.databricks/workspaces resource provider in $Resources variable. 
-Excel Sheet Name: Databricks
+This script consolidates information for all 'microsoft.machinelearningservices/workspaces' resource provider in $Resources variable. 
+Excel Sheet Name: Machine Learning
 
 .Link
-https://github.com/microsoft/ARI/Modules/Data/Databricks.ps1
+https://github.com/microsoft/ARI/Modules/Analytics/MachineLearning.ps1
 
 .COMPONENT
     This powershell Module is part of Azure Resource Inventory (ARI)
@@ -25,24 +25,26 @@ param($SCPath, $Sub, $Intag, $Resources, $Task , $File, $SmaResources, $TableSty
 
 If ($Task -eq 'Processing') {
 
-    $DataBricks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.databricks/workspaces' }
+    $AzureML = $Resources | Where-Object { $_.TYPE -eq 'microsoft.machinelearningservices/workspaces' }
 
-    if($DataBricks)
+    if($AzureML)
         {
             $tmp = @()
 
-            foreach ($1 in $DataBricks) {
+            foreach ($1 in $AzureML) {
                 $ResUCount = 1
                 $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
                 $data = $1.PROPERTIES
                 $sku = $1.SKU
                 $RetDate = ''
                 $RetFeature = '' 
-                $timecreated = $data.createdDateTime
+                $timecreated = $data.creationTime
                 $timecreated = [datetime]$timecreated
                 $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
-                $PIP = if($data.parameters.enableNoPublicIp.value -eq 'False'){$true}else{$false}
-                $VNET = $data.parameters.customVirtualNetworkId.value.split('/')[8]
+                $StorageAcc = $data.storageAccount.split('/')[8]
+                $KeyVault = $data.keyVault.split('/')[8]
+                $Insight = $data.applicationInsights.split('/')[8]
+                $containerRegistry = $data.containerRegistry.split('/')[8]
                 $Tags = if(![string]::IsNullOrEmpty($1.tags.psobject.properties)){$1.tags.psobject.properties}else{'0'}
                     foreach ($Tag in $Tags) {
                         $obj = @{
@@ -51,20 +53,22 @@ If ($Task -eq 'Processing') {
                             'Resource Group'            = $1.RESOURCEGROUP;
                             'Name'                      = $1.NAME;
                             'Location'                  = $1.LOCATION;
-                            'Pricing Tier'              = $sku.name;
-                            'Managed Resource Group'    = $data.managedResourceGroupId.split('/')[4];
-                            'Storage Account'           = $data.parameters.storageAccountName.value;
-                            'Storage Account SKU'       = $data.parameters.storageAccountSkuName.value;
-                            'Infrastructure Encryption' = $data.parameters.requireInfrastructureEncryption.value;
-                            'Prepare Encryption'        = $data.parameters.prepareEncryption.value;
+                            'SKU'                       = $sku.name;
+                            'Friendly Name'             = $data.friendlyName;
+                            'Description'               = $data.description;
+                            'HBI Workspace'             = $data.hbiWorkspace;
+                            'Container Registry'        = $containerRegistry;
                             'Retirement Date'           = [string]$RetDate;
                             'Retirement Feature'        = $RetFeature;
-                            'Enable Public IP'          = $PIP;
-                            'Custom Virtual Network'    = $VNET;
-                            'Custom Private Subnet'     = $data.parameters.customPrivateSubnetName.value;
-                            'Custom Public Subnet'      = $data.parameters.customPublicSubnetName.value;
-                            'URL'                       = $data.workspaceUrl;
+                            'Storage HNS Enabled'       = $data.storageHnsEnabled;
+                            'Private Link Count'        = $data.privateLinkCount;
+                            'Public Access Behind Vnet' = $data.allowPublicAccessWhenBehindVnet;
+                            'Discovery Url'             = $data.discoveryUrl;
+                            'ML Flow Tracking Uri'      = $data.mlFlowTrackingUri;
+                            'Storage Account'           = $StorageAcc;
+                            'Key Vault'                 = $KeyVault;
                             'Created Time'              = $timecreated;
+                            'Application Insight'       = $Insight;
                             'Resource U'                = $ResUCount;
                             'Tag Name'                  = [string]$Tag.Name;
                             'Tag Value'                 = [string]$Tag.Value
@@ -81,19 +85,13 @@ If ($Task -eq 'Processing') {
 Else {
     <######## $SmaResources.(RESOURCE FILE NAME) ##########>
 
-    if ($SmaResources.Databricks) {
+    if ($SmaResources.AzureML) {
 
-        $TableName = ('DBricksTable_'+($SmaResources.Databricks.id | Select-Object -Unique).count)
+        $TableName = ('AzureMLTable_'+($SmaResources.AzureML.id | Select-Object -Unique).count)
         $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
 
         $condtxt = @()
-        
-        $condtxt += New-ConditionalText FALSE -Range I:I
-        $condtxt += New-ConditionalText FALSO -Range I:I
-        $condtxt += New-ConditionalText FALSE -Range J:J
-        $condtxt += New-ConditionalText FALSO -Range J:J
-        $condtxt += New-ConditionalText - -Range K:K -ConditionalType ContainsText
-
+        $condtxt += New-ConditionalText - -Range J:J -ConditionalType ContainsText
 
 
         $Exc = New-Object System.Collections.Generic.List[System.Object]
@@ -101,19 +99,21 @@ Else {
         $Exc.Add('Resource Group')
         $Exc.Add('Name')
         $Exc.Add('Location')
-        $Exc.Add('Pricing Tier')
-        $Exc.Add('Managed Resource Group')
-        $Exc.Add('Storage Account')
-        $Exc.Add('Storage Account SKU')
-        $Exc.Add('Infrastructure Encryption')
-        $Exc.Add('Prepare Encryption')
+        $Exc.Add('SKU')
+        $Exc.Add('Friendly Name')
+        $Exc.Add('Description')
+        $Exc.Add('HBI Workspace')
+        $Exc.Add('Container Registry')
         $Exc.Add('Retirement Date')
         $Exc.Add('Retirement Feature')
-        $Exc.Add('Enable Public IP')
-        $Exc.Add('Custom Virtual Network')
-        $Exc.Add('Custom Private Subnet')
-        $Exc.Add('Custom Public Subnet')
-        $Exc.Add('URL')
+        $Exc.Add('Storage HNS Enabled')
+        $Exc.Add('Private Link Count')
+        $Exc.Add('Public Access Behind Vnet')
+        $Exc.Add('Discovery Url')
+        $Exc.Add('ML Flow Tracking Uri')
+        $Exc.Add('Storage Account')
+        $Exc.Add('Key Vault')
+        $Exc.Add('Application Insight')
         $Exc.Add('Created Time')  
         if($InTag)
             {
@@ -121,11 +121,11 @@ Else {
                 $Exc.Add('Tag Value') 
             }
 
-        $ExcelVar = $SmaResources.Databricks
+        $ExcelVar = $SmaResources.AzureML
 
         $ExcelVar | 
         ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Databricks' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
+        Export-Excel -Path $File -WorksheetName 'Machine Learning' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
 
     }
     <######## Insert Column comments and documentations here following this model #########>

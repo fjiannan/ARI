@@ -13,7 +13,7 @@ https://github.com/microsoft/ARI/Modules/Infrastructure/StorageAcc.ps1
 This powershell Module is part of Azure Resource Inventory (ARI)
 
 .NOTES
-Version: 2.2.1
+Version: 3.0.2
 First Release Date: 19th November, 2020
 Authors: Claudio Merola and Renato Gregio
 
@@ -38,7 +38,13 @@ If ($Task -eq 'Processing') {
                 $ResUCount = 1
                 $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
                 $data = $1.PROPERTIES
+                $RetDate = ''
+                $RetFeature = '' 
+                $timecreated = $data.creationTime
+                $timecreated = [datetime]$timecreated
+                $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
                 $TLSv = if ($data.minimumTlsVersion -eq 'TLS1_2') { "TLS 1.2" }elseif ($data.minimumTlsVersion -eq 'TLS1_1') { "TLS 1.1" }else { "TLS 1.0" }
+                $PvtEnd = [string]$data.privateEndpointConnections.count
                 $Tags = if(![string]::IsNullOrEmpty($1.tags.psobject.properties)){$1.tags.psobject.properties}else{'0'}
                     foreach ($Tag in $Tags) {
                         $obj = @{
@@ -50,10 +56,13 @@ If ($Task -eq 'Processing') {
                             'Zone'                                  = $1.ZONES;
                             'SKU'                                   = $1.sku.name;
                             'Tier'                                  = $1.sku.tier;
+                            'Retirement Date'                       = [string]$RetDate;
+                            'Retirement Feature'                    = $RetFeature;
                             'Supports HTTPs Traffic Only'           = $data.supportsHttpsTrafficOnly;
                             'Allow Blob Public Access'              = if ($data.allowBlobPublicAccess -eq $false) { $false }else { $true };
                             'Minimum TLS Version'                   = $TLSv;
                             'Identity-based access for file shares' = if ($data.azureFilesIdentityBasedAuthentication.directoryServiceOptions -eq 'None') { $false }elseif ($null -eq $data.azureFilesIdentityBasedAuthentication.directoryServiceOptions) { $false }else { $true };
+                            'Private Endpoints'                     = $PvtEnd;
                             'Access Tier'                           = $data.accessTier;
                             'Primary Location'                      = $data.primaryLocation;
                             'Status Of Primary'                     = $data.statusOfPrimary;
@@ -64,6 +73,7 @@ If ($Task -eq 'Processing') {
                             'Queue Address'                         = [string]$data.primaryEndpoints.queue;
                             'Network Acls'                          = $data.networkAcls.defaultAction;
                             'Hierarchical namespace'                = $data.isHnsEnabled;
+                            'Created Time'                          = $timecreated;   
                             'Resource U'                            = $ResUCount;
                             'Tag Name'                              = [string]$Tag.Name;
                             'Tag Value'                             = [string]$Tag.Value
@@ -87,11 +97,12 @@ Else {
         $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
 
         $condtxt = @()
-        $condtxt += New-ConditionalText false -Range H:H
-        $condtxt += New-ConditionalText falso -Range H:H
-        $condtxt += New-ConditionalText true -Range I:I
-        $condtxt += New-ConditionalText verdadeiro -Range I:I
-        $condtxt += New-ConditionalText 1.0 -Range J:J
+        $condtxt += New-ConditionalText false -Range J:J
+        $condtxt += New-ConditionalText falso -Range J:J
+        $condtxt += New-ConditionalText true -Range K:K
+        $condtxt += New-ConditionalText verdadeiro -Range K:K
+        $condtxt += New-ConditionalText 1.0 -Range L:L
+        $condtxt += New-ConditionalText - -Range H:H -ConditionalType ContainsText
 
         $Exc = New-Object System.Collections.Generic.List[System.Object]
         $Exc.Add('Subscription')
@@ -101,10 +112,13 @@ Else {
         $Exc.Add('Zone')
         $Exc.Add('SKU')
         $Exc.Add('Tier')
+        $Exc.Add('Retirement Date')
+        $Exc.Add('Retirement Feature')  
         $Exc.Add('Supports HTTPS Traffic Only')
         $Exc.Add('Allow Blob Public Access')
         $Exc.Add('Minimum TLS Version')
         $Exc.Add('Identity-based access for file shares')
+        $Exc.Add('Private Endpoints')
         $Exc.Add('Access Tier')
         $Exc.Add('Primary Location')
         $Exc.Add('Status Of Primary')
@@ -115,6 +129,7 @@ Else {
         $Exc.Add('Table Address')
         $Exc.Add('Queue Address')
         $Exc.Add('Network Acls')
+        $Exc.Add('Created Time')
         if($InTag)
             {
                 $Exc.Add('Tag Name')
@@ -132,12 +147,14 @@ Else {
 
         $excel = Open-ExcelPackage -Path $File -KillExcel
 
-        $null = $excel.StorageAcc.Cells["H1"].AddComment("Is recommended that you configure your storage account to accept requests from secure connections only by setting the Secure transfer required property for the storage account.", "Azure Resource Inventory")
-        $excel.StorageAcc.Cells["H1"].Hyperlink = 'https://docs.microsoft.com/en-us/azure/storage/common/storage-require-secure-transfer'
-        $null = $excel.StorageAcc.Cells["I1"].AddComment("When a container is configured for public access, any client can read data in that container. Public access presents a potential security risk, so if your scenario does not require it, Microsoft recommends that you disallow it for the storage account.", "Azure Resource Inventory")
-        $excel.StorageAcc.Cells["I1"].Hyperlink = 'https://docs.microsoft.com/en-us/azure/storage/blobs/anonymous-read-access-configure?tabs=portal'
-        $null = $excel.StorageAcc.Cells["J1"].AddComment("By default, Azure Storage accounts permit clients to send and receive data with the oldest version of TLS, TLS 1.0, and above. To enforce stricter security measures, you can configure your storage account to require that clients send and receive data with a newer version of TLS", "Azure Resource Inventory")
-        $excel.StorageAcc.Cells["J1"].Hyperlink = 'https://docs.microsoft.com/en-us/azure/storage/common/transport-layer-security-configure-minimum-version?tabs=portal'
+        $null = $excel.'Storage Acc'.Cells["J1"].AddComment("Is recommended that you configure your storage account to accept requests from secure connections only by setting the Secure transfer required property for the storage account.")
+        $excel.'Storage Acc'.Cells["J1"].Hyperlink = 'https://docs.microsoft.com/en-us/azure/storage/common/storage-require-secure-transfer'
+        $null = $excel.'Storage Acc'.Cells["K1"].AddComment("When a container is configured for public access, any client can read data in that container. Public access presents a potential security risk, so if your scenario does not require it, Microsoft recommends that you disallow it for the storage account.")
+        $excel.'Storage Acc'.Cells["K1"].Hyperlink = 'https://docs.microsoft.com/en-us/azure/storage/blobs/anonymous-read-access-configure?tabs=portal'
+        $null = $excel.'Storage Acc'.Cells["L1"].AddComment("By default, Azure Storage accounts permit clients to send and receive data with the oldest version of TLS, TLS 1.0, and above. To enforce stricter security measures, you can configure your storage account to require that clients send and receive data with a newer version of TLS")
+        $excel.'Storage Acc'.Cells["L1"].Hyperlink = 'https://docs.microsoft.com/en-us/azure/storage/common/transport-layer-security-configure-minimum-version?tabs=portal'
+        $null = $excel.'Storage Acc'.Cells["H1"].AddComment("It's important to be aware of upcoming Azure services and feature retirements to understand their impact on your workloads and plan migration.")
+        $excel.'Storage Acc'.Cells["H1"].Hyperlink = 'https://learn.microsoft.com/en-us/azure/advisor/advisor-how-to-plan-migration-workloads-service-retirement'
 
         Close-ExcelPackage $excel
 
