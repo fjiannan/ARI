@@ -215,12 +215,12 @@ if(!$RunLite)
         $Draw.SetSize(445, 240)
         $Draw.SetPosition(1, 0, 2, 5)
 
-        $txt = $Draw.RichText.Add('Azure Resource Inventory v3.1' + "`n")
+        $txt = $Draw.RichText.Add('FWD Cloud(Azure) Resources List' + "`n")
         $txt.Size = 14
         $txt.ComplexFont = $Font
         $txt.LatinFont = $Font
 
-        $txt = $Draw.RichText.Add('https://github.com/microsoft/ARI' + "`n" + "`n")
+        $txt = $Draw.RichText.Add('http://portal.azure.com' + "`n" + "`n")
         $txt.Size = 11
         $txt.ComplexFont = $Font
         $txt.LatinFont = $Font
